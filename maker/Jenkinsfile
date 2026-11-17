@@ -19,6 +19,7 @@ pipeline {
 
     stages {
 
+        // 1. Checkout Source Code
         stage('Checkout Source Code') {
             steps {
                 checkout scm
@@ -26,6 +27,7 @@ pipeline {
             }
         }
 
+        // 2. SonarQube Analysis
         stage('SonarQube Analysis') {
             steps {
                 script {
@@ -36,13 +38,15 @@ pipeline {
                             ${scannerHome}/bin/sonar-scanner \
                             -Dsonar.projectKey=maker-key \
                             -Dsonar.projectName=maker-project-test \
-                            -Dsonar.sources=.
+                            -Dsonar.sources=. \
+                            -Dsonar.sourceEncoding=UTF-8
                         """
                     }
                 }
             }
         }
 
+        // 3. Build and Push Docker Image
         stage('Build & Push Docker Image') {
             steps {
                 script {
@@ -54,16 +58,18 @@ pipeline {
                         )
                     ]) {
                         sh '''
+                            set -e
+
                             echo "$DOCKER_PASS" | docker login \
                             -u "$DOCKER_USER" --password-stdin
 
                             docker build \
-                            -t docker777john/maker:${BUILD_NUMBER} \
-                            -t docker777john/maker:latest \
+                            -t ${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                            -t ${DOCKER_IMAGE}:latest \
                             -f maker/Dockerfile maker
 
-                            docker push docker777john/maker:${BUILD_NUMBER}
-                            docker push docker777john/maker:latest
+                            docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                            docker push ${DOCKER_IMAGE}:latest
 
                             docker logout
                         '''
@@ -72,10 +78,12 @@ pipeline {
             }
         }
 
+        // 4. Update Kubernetes Manifest in GitHub
         stage('Update Manifest Repo') {
             steps {
                 dir('manifest-workspace') {
 
+                    // Checkout manifest repository
                     git branch: "${MANIFEST_BRANCH}",
                         credentialsId: "${GIT_CREDENTIALS_ID}",
                         url: "${MANIFEST_REPO}"
@@ -88,22 +96,54 @@ pipeline {
                         )
                     ]) {
                         sh '''
-                            git remote set-url origin \
-                            https://${GH_USER}:${GH_TOKEN}@github.com/Johnjose10/maker_pipeline.git
+                            set -e
 
-                            git pull --rebase origin main
+                            # Create temporary GitHub authentication script
+                            ASKPASS=$(mktemp)
 
-                            sed -i '/name: maker/{n;s|image:.*|image: docker777john/maker:'"${BUILD_NUMBER}"'|}' \
-                            maker/manifests/deployment.yaml
+                            trap 'rm -f "$ASKPASS"' EXIT
+
+                            cat > "$ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+    *Username*) echo "$GH_USER" ;;
+    *Password*) echo "$GH_TOKEN" ;;
+esac
+EOF
+
+                            chmod 700 "$ASKPASS"
+
+                            export GIT_ASKPASS="$ASKPASS"
+                            export GIT_TERMINAL_PROMPT=0
+
+                            # Configure Git
+                            git remote set-url origin "$MANIFEST_REPO"
 
                             git config user.name "Johnjose10"
                             git config user.email "jhon123jose@gmail.com"
 
+                            # Pull latest changes
+                            git pull --rebase origin "$MANIFEST_BRANCH"
+
+                            # Update Docker image tag in deployment.yaml
+                            sed -i '/name: maker/{n;s|image:.*|image: docker777john/maker:'"${BUILD_NUMBER}"'|}' \
+                            maker/manifests/deployment.yaml
+
+                            # Add updated manifest
                             git add maker/manifests/deployment.yaml
 
-                            git commit -m "chore(manifest): update maker image tag to ${BUILD_NUMBER} [skip ci]"
+                            # Commit and push changes
+                            if ! git diff --cached --quiet; then
 
-                            git push origin main
+                                git commit -m "Update maker image to ${BUILD_NUMBER} [skip ci]"
+
+                                git push origin "$MANIFEST_BRANCH"
+
+                                echo "Manifest successfully pushed to GitHub"
+
+                            else
+                                echo "No manifest changes to commit"
+                            fi
                         '''
                     }
                 }
@@ -111,13 +151,19 @@ pipeline {
         }
     }
 
+    // 5. Post Build Actions
     post {
         success {
-            echo 'Pipeline executed successfully! Docker image pushed and manifest repository updated.'
+            echo 'SUCCESS: Pipeline executed successfully!'
+            echo 'Docker image pushed and Kubernetes manifest updated.'
         }
 
         failure {
-            echo 'Pipeline failed. Please review the stage logs above.'
+            echo 'FAILURE: Pipeline failed. Please check the stage logs.'
+        }
+
+        always {
+            echo 'Jenkins pipeline execution completed.'
         }
     }
 }
