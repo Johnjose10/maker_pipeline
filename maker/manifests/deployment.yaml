@@ -24,7 +24,7 @@ spec:
     spec:
       containers:
         - name: maker
-          image: docker777john/maker:12
+          image: docker777john/maker:13
           imagePullPolicy: Always
           ports:
             - containerPort: 80
